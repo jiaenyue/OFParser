@@ -41,108 +41,138 @@ import re
 import httplib
 import base64
 import glob
+import copy
 from lxml import etree
 from zipfile import ZipFile
 from cStringIO import StringIO
+
+#{ OFEntry
+class OFEntry:
+    def __init__(self, node):
+        self._ns = {'n': node.nsmap[None]}
+        self.type = node.tag
+        self.id = node.get('id')
+        self.name = self._getText('n:name', node)
+        self.added = self._getText('n:added', node)
+        self.modified = self._getText('n:modified', node)
+        self.rank = self._getText('n:rank', node) 
+
+    def _getText(self, tag, node):
+        return "".join([n.text for n in node.xpath(tag,namespaces=self._ns)])
+    def _getAttr(self, tag, node):
+        return "".join([n for n in node.xpath(tag,namespaces=self._ns)])
+    def _getChildren(self, tag, node):
+        return node.xpath(tag, namespaces=self._ns)
+
+#}
+#{ OFTask
+class OFTask(OFEntry):
+    def __init__(self, node):
+        OFEntry.__init__(self, node)
+        self.due = self._getText('n:due', node)
+        self.parent = self._getAttr('n:task/@idref', node)
+        self.context = self._getAttr('n:context/@idref', node)
+        self.order = self._getText('n:order', node) 
+        if len(self._getChildren('n:project', node)) > 0:
+            p = self._getChildren('n:project', node)[0]
+            self.project = True
+            self.last_review = self._getText('n:last-review', p)
+            self.review_interval = self._getText('n:review-interval', p)
+            self.parent = self._getAttr('n:folder/@idref', p)
+        if len(self._getChildren('n:inbox', node)) > 0:
+            self.inbox = True
+        self._orig = copy.deepcopy(self)
+#}
+#{ OFFolder
+class OFFolder(OFEntry):
+    def __init__(self, node):
+        OFEntry.__init__(self, node)
+        self.parent = self._getAttr('n:folder/@idref', node) 
+        self._orig = copy.deepcopy(self)
+#}
+#{ OFContext
+class OFContext(OFEntry):
+    def __init__(self, node):
+        OFEntry.__init__(self, node)
+        self.parent = self._getAttr('n:context/@idref', node) 
+        self._orig = copy.deepcopy(self)
+#}
 
 #{ OFStore
 class OFStore:
     def __init__(self):
         self._data = {'': None}
 
-    def _getText(self, tag, node):
-        return "".join([n.text for n in node.xpath(tag,namespaces=self._ofns)])
-    def _getAttr(self, tag, node):
-        return "".join([n for n in node.xpath(tag,namespaces=self._ofns)])
-
     def _parseSetting(self, node):
-        return { 'name': node.get('id') }
+        return None
     def _parseContext(self, node):
-        return { 'parent': self._getAttr('n:context/@idref', node) }
+        return OFContext(node)
     def _parseFolder(self, node):
-        return { 'parent': self._getAttr('n:folder/@idref', node) }
+        return OFFolder(node)
     def _parseTask(self, node):
-        obj = { 'due': self._getText('n:due', node),
-                'parent': self._getAttr('n:task/@idref', node),
-                'context': self._getAttr('n:context/@idref', node),
-                'order': self._getText('n:order', node) }
-        if len(node.xpath('n:project', namespaces=self._ofns)) > 0:
-            p = node.xpath('n:project', namespaces=self._ofns)[0]
-            obj['project'] = True
-            obj['last-review'] = self._getText('n:last-review', p)
-            obj['review-interval'] = self._getText('n:review-interval', p)
-            obj['parent'] = self._getAttr('n:folder/@idref', p)
-        return obj
+        return OFTask(node)
     def _parsePersective(self, node):
-        return {}
+        return None
 
-    def _parseTag(self, node):
-        if not hasattr(self, '_parserfactory'):
-            self._parserfactory = {
-             '{http://www.omnigroup.com/namespace/OmniFocus/v1}setting': self._parseSetting,
-             '{http://www.omnigroup.com/namespace/OmniFocus/v1}context': self._parseContext,
-             '{http://www.omnigroup.com/namespace/OmniFocus/v1}folder': self._parseFolder,
-             '{http://www.omnigroup.com/namespace/OmniFocus/v1}task': self._parseTask,
-             '{http://www.omnigroup.com/namespace/OmniFocus/v1}perspective': self._parsePersective
-             }
-
-        obj = { 'type': node.tag, 
-                'id': node.get('id'),
-                'name': self._getText('n:name', node),
-                'added': self._getText('n:added', node),
-                'modified': self._getText('n:modified', node),
-                'rank': self._getText('n:rank', node) }
-        obj.update(self._parserfactory[node.tag](node))
-        return obj
-        
     def _parseString(self,contents):
+        self._parserfactory = {
+         '{http://www.omnigroup.com/namespace/OmniFocus/v1}setting': self._parseSetting,
+         '{http://www.omnigroup.com/namespace/OmniFocus/v1}context': self._parseContext,
+         '{http://www.omnigroup.com/namespace/OmniFocus/v1}folder': self._parseFolder,
+         '{http://www.omnigroup.com/namespace/OmniFocus/v1}task': self._parseTask,
+         '{http://www.omnigroup.com/namespace/OmniFocus/v1}perspective': self._parsePersective
+         }
+
         try:
             self._tree = etree.fromstring(contents)
-            self._ofns = {'n': self._tree.nsmap[None]}
 
             for elmnt in self._tree.xpath('*'):
                 if elmnt.get('op') == 'delete' and elmnt.get('id') in self._data:
                     del self._data[elmnt.get('id')]
                 else:
-                    obj = self._parseTag(elmnt)
-                    self._data[obj['id']] = obj
+                    obj = self._parserfactory[elmnt.tag](elmnt)
+                    if obj != None:
+                        self._data[obj.id] = obj
         except Exception, e:
             print contents
             raise e
 
     def _gettasks(self):
-        return filter(lambda x: x != None and x['type'].endswith('task'), self._data.values())
+        return filter(lambda x:x!=None and x.type.endswith('task'),self._data.values())
     tasks = property(_gettasks)
     def _getfolders(self):
-        return filter(lambda x: x != None and x['type'].endswith('folder'), self._data.values())
+        return filter(lambda x:x!=None and x.type.endswith('folder'),self._data.values())
     folders = property(_getfolders)
     def _getcontexts(self):
-        return filter(lambda x: x != None and x['type'].endswith('context'), self._data.values())
+        return filter(lambda x:x!=None and x.type.endswith('context'),self._data.values())
     contexts = property(_getcontexts)
     def _getall(self):
-        return filter(lambda x: x != None, self._data.values())
+        return filter(lambda x:x!=None,self._data.values())
     all = property(_getall)
     def getById(self, id):
         return self._data[id]
 
+    def delete(self, id, recurse=False):
+        return True
+
     def _printContextTree(self, node, level):
-        print '    '*level+node['name']
-        for child in filter(lambda c:c['parent'] == node['id'], self.contexts):
+        print '    '*level+node.name
+        for child in filter(lambda c:c.parent == node.id, self.contexts):
             self._printContextTree(child, level+1)
-        for child in filter(lambda c:c['context'] == node['id'], self.tasks):
+        for child in filter(lambda c:c.context == node.id, self.tasks):
             self._printContextTree(child, level+1)
 
     def _printProjectTree(self, node, level):
-        print '    '*level+node['name']
-        for child in filter(lambda c:'parent' in c and c['parent'] == node['id'], self.all):
+        print '    '*level+node.name
+        for child in filter(lambda c:hasattr(c, 'parent') and c.parent == node.id, self.all):
             self._printProjectTree(child, level+1)
 
     def prettyPrint(self):
         print "Context\n---------------------"
-        for context in filter(lambda c:c['parent'] == '', self.contexts):
+        for context in filter(lambda c:c.parent == '', self.contexts):
             self._printContextTree(context, 0)
         print "Project\n---------------------"
-        for project in filter(lambda c:c['parent'] == '', self.folders):
+        for project in filter(lambda c:c.parent == '', self.folders):
             self._printProjectTree(project, 0)
 #}
 #{ WebDAVOFStore
